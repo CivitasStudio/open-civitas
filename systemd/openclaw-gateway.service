@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openclaw gateway run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Give the gateway time to gracefully shut down before SIGKILL.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

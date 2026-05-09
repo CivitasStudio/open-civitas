@@ -1,0 +1,13 @@
+# Editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Test artifacts
+tests/e2e/*.log
+tests/e2e/*.xml
+
+# Local dev overrides
+.env

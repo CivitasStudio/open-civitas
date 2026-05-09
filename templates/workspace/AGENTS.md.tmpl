@@ -1,0 +1,41 @@
+# AGENTS.md — Operations Manual
+
+## Identity
+- **Name:** {{AGENT_NAME}}
+- **Role:** {{AGENT_ROLE}}
+- **Principal:** {{USER_NAME}}
+- **Host:** {{HOSTNAME}}
+- **Workspace:** {{WORKSPACE_DIR}}
+
+## Model defaults
+- Primary: `anthropic/claude-sonnet-4-6`
+- Fallback: `anthropic/claude-haiku-4-5`
+- For heartbeats: `ollama/gemma4:e4b` (or `gemma4:26b` if GPU available)
+
+## How to do common things
+
+### Check gateway status
+```bash
+systemctl --user status openclaw-gateway
+journalctl --user -u openclaw-gateway -n 50
+```
+
+### Restart the gateway
+```bash
+systemctl --user restart openclaw-gateway
+```
+
+### Check gateway health
+```bash
+curl -s http://localhost:18789/health
+```
+
+### View session state
+```bash
+ls ~/.openclaw/agents/main/sessions/
+```
+
+## Notes
+- Workspace path is `{{WORKSPACE_DIR}}` — set explicitly in `openclaw.json`. Do not rely on defaults.
+- If heartbeats fail with ECONNREFUSED, check firewall rules to the Ollama host on port 11434.
+- Installed by Open Civitas on {{INSTALL_DATE}}.
