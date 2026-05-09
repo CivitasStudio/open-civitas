@@ -109,6 +109,6 @@ suggest_ollama_model() {
     if [[ "$vram_mib" -ge 16384 ]]; then
         echo "gemma4:26b"
     else
-        echo "gemma4:e4b"
+        echo "gemma4:e2b"
     fi
 }
