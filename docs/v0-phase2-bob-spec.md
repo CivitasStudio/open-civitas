@@ -27,7 +27,7 @@
 - **Model size:** 7.2 GB (Q4_K_M quantization), fits comfortably on 30 GB disk with headroom.
 - **Inference performance:** ~5-10 tokens/sec on 4-core CPU — acceptable latency for heartbeat + interactive testing.
 - **Context window:** 128K tokens, sufficient for agent workspace + daily memory injection.
-- **Capabilities:** Text, image, audio support (multimodal); structured function calling (agent workflows); 128K context.
+- **Capabilities:** Text and image input (verified against Ollama Registry model card); audio benchmarks (CoVoST/FLEURS) are absent for E2B in Ollama's published results — audio is not claimed for this variant. Structured function calling; 128K context.
 - **Design target:** E2B ("Effective 2B") is explicitly optimized for edge deployment; proven low-resource footprint.
 
 **Fallback:** If `gemma4:e2b` tag becomes unavailable, substitute `gemma4:e4b` (next-larger edge model, 4B effective parameters). Both E-series variants are designed for offline, CPU-only inference.
@@ -80,11 +80,6 @@ curl https://raw.githubusercontent.com/CivitasStudio/open-civitas/main/install.s
 **openclaw.json (programmatic generation):**
 ```json
 {
-  "auth": {
-    "profiles": {
-      "anthropic:default": { "provider": "claude-cli", "mode": "local-only" }
-    }
-  },
   "gateway": {
     "mode": "local"
   },
@@ -188,8 +183,7 @@ journalctl --user -u openclaw-gateway -f
 
 ## References
 
-- Ollama Registry: https://ollama.com/library/gemma4:e2b
-- Gemma4 Specifications: https://gemma4.org/gemma-4-model-sizes
+- Ollama Registry (gemma4 family): https://ollama.com/library/gemma4
 - Phase 1 Install: `docs/INSTALL.md` and `install.sh`
 - Heartbeat Patterns (Penny reference): `handbook/install-gotchas.md` (line 59–66)
 - Agent-to-agent comms: `~/alex-reference/agent-to-agent-comms-plan.md`
