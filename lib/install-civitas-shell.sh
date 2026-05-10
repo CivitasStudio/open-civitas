@@ -15,8 +15,24 @@ install_civitas_shell() {
     # to the npm registry.
     local local_pkg="${SCRIPT_DIR}/civitas-shell"
     if [[ -f "${local_pkg}/package.json" ]]; then
-        log_info "Installing civitas-shell from local checkout…"
-        sudo npm install -g "${local_pkg}"
+        # Pack into a tarball first — "npm install -g <dir>" on modern npm
+        # (≥v7) symlinks the source dir rather than copying it, which breaks
+        # dep resolution when source node_modules/ isn't populated.  Installing
+        # from a tarball forces a real copy with deps resolved from the registry.
+        log_info "Packing civitas-shell from local checkout…"
+        local tarball
+        tarball=$(cd "${local_pkg}" && npm pack --json 2>/dev/null \
+            | grep '"filename"' \
+            | sed 's/.*"filename":[[:space:]]*"\([^"]*\)".*/\1/' \
+            | head -1)
+        if [[ -z "$tarball" ]]; then
+            log_error "npm pack did not produce a tarball filename."
+            return 1
+        fi
+        local tarball_path="${local_pkg}/${tarball}"
+        log_info "Installing civitas-shell from packed tarball…"
+        sudo npm install -g "${tarball_path}"
+        rm -f "${tarball_path}"
     else
         log_info "Installing @civitasstudio/civitas-shell from npm registry…"
         sudo npm install -g @civitasstudio/civitas-shell
