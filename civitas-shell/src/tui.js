@@ -129,7 +129,7 @@ function App({ gw, sessionId: initialSessionId, history }) {
           m.runId === evt.runId ? { ...m, isStreaming: false } : m
         ));
         setStatus('error');
-        setStatusMsg(evt.errorMessage ?? 'run error');
+        setStatusMsg(evt.errorMessage || 'run error');
         activeRunIdRef.current = null;
       }
     };
@@ -139,9 +139,15 @@ function App({ gw, sessionId: initialSessionId, history }) {
       setStatusMsg('gateway unreachable — retrying…');
     };
 
+    const onReconnect = () => {
+      setStatus('idle');
+      setStatusMsg('');
+    };
+
     gw.on('event', onEvent);
     gw.on('close', onClose);
-    return () => { gw.off('event', onEvent); gw.off('close', onClose); };
+    gw.on('reconnect', onReconnect);
+    return () => { gw.off('event', onEvent); gw.off('close', onClose); gw.off('reconnect', onReconnect); };
   }, [gw]);
 
   const sendMessage = useCallback(() => {
@@ -293,7 +299,7 @@ export async function launchTUI() {
       isStreaming: false,
     }));
 
-  const { waitUntilExit } = render(h(App, { gw, sessionId, history }));
+  const { waitUntilExit } = render(h(App, { gw, sessionId, history }), { exitOnCtrlC: false });
   await waitUntilExit();
   gw.close();
 }

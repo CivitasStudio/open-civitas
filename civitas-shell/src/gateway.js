@@ -17,6 +17,8 @@ export class GatewayClient extends EventEmitter {
     this.pending = new Map();
     this.defaultTimeoutMs = opts.timeoutMs ?? 30_000;
     this.connected = false;
+    this._reconnectTimer = null;
+    this._closed = false; // set true on explicit close() to stop reconnect loop
   }
 
   connect() {
@@ -75,8 +77,11 @@ export class GatewayClient extends EventEmitter {
         // reject any pending requests
         for (const p of this.pending.values()) p.reject(new Error(msg));
         this.pending.clear();
+        this.connected = false;
         if (!settled) fail(new Error(msg));
         this.emit('close', code);
+        // auto-reconnect unless explicitly closed
+        if (!this._closed) this._scheduleReconnect();
       });
     });
   }
@@ -124,7 +129,24 @@ export class GatewayClient extends EventEmitter {
     });
   }
 
+  _scheduleReconnect(delayMs = 3000) {
+    if (this._reconnectTimer) return;
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (this._closed) return;
+      this.connect().then(() => {
+        this.emit('reconnect');
+      }).catch(() => {
+        // connect failed; schedule another attempt
+        if (!this._closed) this._scheduleReconnect(Math.min(delayMs * 2, 30_000));
+      });
+    }, delayMs);
+    this._reconnectTimer.unref?.();
+  }
+
   close() {
+    this._closed = true;
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this.ws?.close();
   }
 }
