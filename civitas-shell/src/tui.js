@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { render, Box, Text, useInput, useApp, useStdout } from 'ink';
 import { randomUUID } from 'crypto';
+import { spawn } from 'child_process';
 import { GatewayClient } from './gateway.js';
 import { loadConfig } from './config.js';
 
@@ -31,6 +32,41 @@ function estimateLines(text, cols) {
   if (!text) return 0;
   const usable = Math.max(cols - 4, 20); // 2-space indent + margin
   return text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / usable)), 0);
+}
+
+// Suspend ink, hand the terminal to $SHELL, then return.
+// Saves/restores terminal raw mode around the child so ink can resume cleanly.
+async function spawnBash() {
+  const shell = process.env.SHELL || '/bin/bash';
+
+  // ink left the terminal in raw mode; restore to cooked before handing off
+  if (process.stdin.isTTY) {
+    try { process.stdin.setRawMode(false); } catch {}
+  }
+  // pause Node.js's stdin read loop so the child gets exclusive access
+  process.stdin.pause();
+
+  await new Promise((resolve) => {
+    const child = spawn(shell, [], {
+      stdio: 'inherit',
+      env: { ...process.env, TERM: process.env.TERM || 'xterm-256color' },
+    });
+
+    // Forward resize signals to child so interactive programs inside bash
+    // (vim, less, etc.) hear about terminal resizes.
+    const onWinch = () => { try { child.kill('SIGWINCH'); } catch {} };
+    process.on('SIGWINCH', onWinch);
+
+    const cleanup = () => {
+      process.off('SIGWINCH', onWinch);
+      resolve();
+    };
+    child.on('exit', cleanup);
+    child.on('error', cleanup); // spawn failure (shell missing)
+  });
+
+  // Give stdin back; ink will set raw mode again on re-render
+  process.stdin.resume();
 }
 
 // --- Components ---
@@ -65,7 +101,7 @@ function MessageBlock({ role, text }) {
   );
 }
 
-function App({ gw, sessionId: initialSessionId, history, loginShell }) {
+function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscape }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termRows = stdout?.rows ?? 24;
@@ -79,6 +115,9 @@ function App({ gw, sessionId: initialSessionId, history, loginShell }) {
   const [scrollOffset, setScrollOffset] = useState(0); // messages from end to skip
   const [sessionId] = useState(initialSessionId);
   const activeRunIdRef = useRef(null);
+  // Stable ref so slash-command callbacks always see latest messages
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   // Gateway event wiring
   useEffect(() => {
@@ -174,6 +213,7 @@ function App({ gw, sessionId: initialSessionId, history, loginShell }) {
 
     if (cmd === 'help') {
       addSystemMessage(
+        '/bash    drop to shell (exit to return)\n' +
         '/clear   clear visible transcript\n' +
         '/model   show current model and gateway status\n' +
         '/help    show this message\n' +
@@ -205,8 +245,16 @@ function App({ gw, sessionId: initialSessionId, history, loginShell }) {
       return;
     }
 
+    if (cmd === 'bash') {
+      // Pass current messages snapshot to launchTUI so transcript survives
+      // the ink unmount/remount cycle.
+      onBashEscape(messagesRef.current);
+      exit();
+      return;
+    }
+
     addSystemMessage(`unknown command: ${raw}  (type /help for commands)`);
-  }, [gw, status, loginShell, exit, addSystemMessage]);
+  }, [gw, status, loginShell, exit, addSystemMessage, onBashEscape]);
 
   const sendMessage = useCallback(() => {
     const raw = inputText.trim();
@@ -362,7 +410,9 @@ export async function launchTUI(opts = {}) {
   });
   const sessionId = histResult?.sessionId;
 
-  const history = (histResult?.messages ?? [])
+  // currentMessages carries transcript state across /bash escapes so the
+  // transcript survives ink unmount/remount cycles.
+  let currentMessages = (histResult?.messages ?? [])
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .map((m, i) => ({
       id: String(i),
@@ -371,10 +421,30 @@ export async function launchTUI(opts = {}) {
       isStreaming: false,
     }));
 
-  const { waitUntilExit } = render(
-    h(App, { gw, sessionId, history, loginShell: opts.loginShell ?? false }),
-    { exitOnCtrlC: false }
-  );
-  await waitUntilExit();
+  while (true) {
+    let bashEscaped = false;
+
+    const { waitUntilExit } = render(
+      h(App, {
+        gw,
+        sessionId,
+        history: currentMessages,
+        loginShell: opts.loginShell ?? false,
+        onBashEscape: (msgs) => {
+          bashEscaped = true;
+          currentMessages = msgs;
+        },
+      }),
+      { exitOnCtrlC: false }
+    );
+
+    await waitUntilExit();
+
+    if (!bashEscaped) break; // normal exit (/exit or process signal)
+
+    await spawnBash();
+    // loop to re-render ink with preserved transcript
+  }
+
   gw.close();
 }
