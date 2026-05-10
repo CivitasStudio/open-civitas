@@ -48,7 +48,14 @@ function ThinkingDots({ state }) {
   return h(Text, { dimColor: true }, `${label} ${frames[frame]}`);
 }
 
-function MessageBlock({ role, text, isStreaming }) {
+function MessageBlock({ role, text }) {
+  if (role === 'system') {
+    return h(Box, { flexDirection: 'column', marginBottom: 1 },
+      h(Box, { paddingLeft: 2 },
+        h(Text, { dimColor: true, wrap: 'wrap' }, text ?? '')
+      )
+    );
+  }
   const label = role === 'user' ? 'You' : 'Bob';
   return h(Box, { flexDirection: 'column', marginBottom: 1 },
     h(Text, { bold: true }, label),
@@ -58,7 +65,7 @@ function MessageBlock({ role, text, isStreaming }) {
   );
 }
 
-function App({ gw, sessionId: initialSessionId, history }) {
+function App({ gw, sessionId: initialSessionId, history, loginShell }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termRows = stdout?.rows ?? 24;
@@ -150,10 +157,73 @@ function App({ gw, sessionId: initialSessionId, history }) {
     return () => { gw.off('event', onEvent); gw.off('close', onClose); gw.off('reconnect', onReconnect); };
   }, [gw]);
 
+  const addSystemMessage = useCallback((text) => {
+    setMessages(prev => [...prev, { id: randomUUID(), role: 'system', text }]);
+    setScrollOffset(0);
+  }, []);
+
+  const handleSlashCommand = useCallback((raw) => {
+    // First word after the slash, lower-cased. Args ignored in v0.
+    const cmd = raw.slice(1).split(/\s+/)[0].toLowerCase();
+
+    if (cmd === 'clear') {
+      setMessages([]);
+      setScrollOffset(0);
+      return;
+    }
+
+    if (cmd === 'help') {
+      addSystemMessage(
+        '/clear   clear visible transcript\n' +
+        '/model   show current model and gateway status\n' +
+        '/help    show this message\n' +
+        '/exit    exit civitas-shell\n' +
+        '  tip: prefix / with \\ to send literally to agent (e.g. \\/help)'
+      );
+      return;
+    }
+
+    if (cmd === 'exit') {
+      if (loginShell) {
+        addSystemMessage('/exit is disabled in login-shell mode');
+        return;
+      }
+      exit();
+      return;
+    }
+
+    if (cmd === 'model') {
+      const gwStatus = status === 'disconnected' ? 'disconnected' : 'connected';
+      gw.request('session.status', { sessionKey: SESSION_KEY }, { timeoutMs: 5_000 })
+        .then(info => {
+          const model = info?.model || info?.agentModel || info?.runtime?.model || 'unknown';
+          addSystemMessage(`gateway: ${gwStatus}  session: ${SESSION_KEY}  model: ${model}`);
+        })
+        .catch(() => {
+          addSystemMessage(`gateway: ${gwStatus}  session: ${SESSION_KEY}  model: unknown`);
+        });
+      return;
+    }
+
+    addSystemMessage(`unknown command: ${raw}  (type /help for commands)`);
+  }, [gw, status, loginShell, exit, addSystemMessage]);
+
   const sendMessage = useCallback(() => {
-    const text = inputText.trim();
-    if (!text) return;
+    const raw = inputText.trim();
+    if (!raw) return;
+
+    // Slash command: starts with / but not \/ (escaped literal)
+    if (raw.startsWith('/') && !raw.startsWith('\\/')) {
+      setInputText('');
+      setInputRows(1);
+      handleSlashCommand(raw);
+      return;
+    }
+
     if (status === 'thinking' || status === 'streaming') return;
+
+    // Unescape \/ → / before sending to agent
+    const text = raw.startsWith('\\/') ? raw.slice(1) : raw;
 
     const idempotencyKey = randomUUID();
     activeRunIdRef.current = idempotencyKey;
@@ -173,7 +243,7 @@ function App({ gw, sessionId: initialSessionId, history }) {
       setStatus('error');
       setStatusMsg(err.message);
     });
-  }, [inputText, status, gw, sessionId]);
+  }, [inputText, status, gw, sessionId, handleSlashCommand]);
 
   const abortRun = useCallback(() => {
     const runId = activeRunIdRef.current;
@@ -209,7 +279,7 @@ function App({ gw, sessionId: initialSessionId, history }) {
       setInputRows(r => Math.min(r + 1, MAX_INPUT_ROWS));
       return;
     }
-    // Enter: send
+    // Enter: send or dispatch slash command
     if (key.return) { sendMessage(); return; }
 
     // Backspace / Delete
@@ -241,7 +311,9 @@ function App({ gw, sessionId: initialSessionId, history }) {
   let linesUsed = 0;
   while (startIdx > 0) {
     const m = messages[startIdx - 1];
-    const mLines = 1 + 1 + estimateLines(m.text, termCols); // label + blank + content
+    // system messages: no label line, just content
+    const labelLines = m.role === 'system' ? 0 : 1;
+    const mLines = labelLines + 1 + estimateLines(m.text, termCols); // label + blank + content
     if (linesUsed + mLines > transcriptHeight) break;
     linesUsed += mLines;
     startIdx--;
@@ -256,7 +328,7 @@ function App({ gw, sessionId: initialSessionId, history }) {
     // Transcript
     h(Box, { flexDirection: 'column', height: transcriptHeight, overflow: 'hidden' },
       ...visibleMessages.map(m =>
-        h(MessageBlock, { key: m.id, role: m.role, text: m.text, isStreaming: m.isStreaming })
+        h(MessageBlock, { key: m.id, role: m.role, text: m.text })
       )
     ),
     // Status overlay (thinking animation or error)
@@ -273,7 +345,7 @@ function App({ gw, sessionId: initialSessionId, history }) {
   );
 }
 
-export async function launchTUI() {
+export async function launchTUI(opts = {}) {
   const cfg = loadConfig();
   const gw = new GatewayClient({
     url: cfg.gatewayUrl,
@@ -299,7 +371,10 @@ export async function launchTUI() {
       isStreaming: false,
     }));
 
-  const { waitUntilExit } = render(h(App, { gw, sessionId, history }), { exitOnCtrlC: false });
+  const { waitUntilExit } = render(
+    h(App, { gw, sessionId, history, loginShell: opts.loginShell ?? false }),
+    { exitOnCtrlC: false }
+  );
   await waitUntilExit();
   gw.close();
 }

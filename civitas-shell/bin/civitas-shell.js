@@ -28,7 +28,8 @@ if (niIdx !== -1) {
   });
 } else {
   // Interactive TUI mode (default)
-  launchTUI().catch((err) => {
+  const loginShell = args.includes('--login-shell');
+  launchTUI({ loginShell }).catch((err) => {
     process.stderr.write(`Error: ${err.message}\n`);
     process.exit(1);
   });
