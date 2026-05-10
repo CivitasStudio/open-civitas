@@ -1,9 +1,15 @@
 # Open Civitas Phase 3 — `civitas-shell` Spec
 
-**Status:** Draft — awaiting John's review
+**Status:** Draft v2 — **GREENLIT** (Alex + John, 2026-05-10). All three pre-code gates closed. Implementation may begin.
 **Author:** Wayland
-**Date:** 2026-05-09
+**Date:** 2026-05-09 (v1) / 2026-05-10 (v2 — open items closed)
 **Scope:** Full-screen TTY chat client. v0 = chat-only; built and tested against Bob (Phase 2). Boot-into-chat (`getty@tty1` swap) and ISO integration are Phase 4.
+
+**v2 changes (2026-05-10, after Forge investigation):**
+- Open item #1 (local channel adapter) → **resolved, Phase 3-A dropped.** OpenClaw 2026.5.7 already exposes WebChat WS methods (`chat.send`, `chat.history`, `chat.abort`) on the existing Gateway. civitas-shell becomes a third client of that protocol — no gateway-side code, no new channel plugin, no `openclaw.json` schema changes.
+- Open item #2 (auth) → **resolved.** Auth is the existing `gateway.auth.token` / `gateway.auth.password` shared secret (loopback included). No per-channel bearer field.
+- Open item #3 (session semantics) → **flipped.** Sessions are gateway-owned and persistent; `chat.history` returns a `sessionId` that subsequent `chat.send` calls reuse. Matches Control UI / macOS app behavior. Local JSONL transcripts dropped — gateway is the source of truth.
+- Transport changed from HTTP+SSE → WebSocket (the existing Gateway WS, same protocol the macOS/iOS chat UIs use).
 
 ---
 
@@ -48,7 +54,7 @@ v0 is intentionally narrow:
 
 ### Streaming
 
-Token-streaming is mandatory. Gemma4:e2b on CPU is ~5–10 tokens/sec; without streaming the UX is unusable. Tokens render into the active `Bob` block as they arrive over SSE.
+Token-streaming is mandatory. Gemma4:e2b on CPU is ~5–10 tokens/sec; without streaming the UX is unusable. Tokens render into the active `Bob` block as they arrive over the WebSocket connection as `chat` gateway events.
 
 ### Keys
 
@@ -66,20 +72,20 @@ Token-streaming is mandatory. Gemma4:e2b on CPU is ~5–10 tokens/sec; without s
 ## Architecture
 
 ```
-┌──────────────────────┐    HTTP POST     ┌──────────────────────┐
-│   civitas-shell      │ ──────────────►  │  OpenClaw gateway    │
-│   (Node + ink)       │ ◄── SSE stream ──│  127.0.0.1:18789     │
-└──────────────────────┘                  └──────────────────────┘
+┌──────────────────────┐   WebSocket (WS)  ┌──────────────────────┐
+│   civitas-shell      │ ◄────────────────► │  OpenClaw gateway    │
+│   (Node + ink)       │  chat.send/history │  127.0.0.1:18789     │
+└──────────────────────┘                    └──────────────────────┘
         │                                            │
-        │ reads ~/.openclaw/openclaw.json            │ routes via channel adapter:
-        │ for bearer token + channel ID              │ channels.civitasShell
+        │ reads ~/.openclaw/openclaw.json            │ existing WebChat WS
+        │ for gateway.auth.token (shared secret)     │ session routing
         │                                            ▼
         │                                  ┌──────────────────────┐
         │                                  │  agent (Bob)         │
         │                                  │  ollama/gemma4:e2b   │
-        ▼                                  └──────────────────────┘
-~/.openclaw/workspace/civitas-shell/
-  transcripts/<session-id>.jsonl  (append-only history)
+        └──────────────────────────────────┘
+                 no client-side transcript storage —
+                 gateway is the source of truth
 ```
 
 ### Runtime
@@ -92,32 +98,30 @@ Why ink over alternatives:
 
 ### Transport
 
-**HTTP + SSE.** Mirrors how OpenClaw's existing web channel speaks to its frontend.
+**WebSocket — the existing Gateway WS protocol.** Same transport used by the OpenClaw macOS/iOS chat UIs and Control UI. No gateway-side code required; civitas-shell is a third client of an already-shipped protocol.
 
-- `POST /channels/civitas-shell/message` — body: `{sessionId, text}`. Returns 202 + `eventStreamUrl`.
-- `GET <eventStreamUrl>` — SSE; emits `token`, `tool_call_start`, `tool_call_end`, `done`, `error` events.
-- Bearer token from `agents.defaults.bearerToken` (or whichever `openclaw.json` field already holds it — verify against current OpenClaw release before implementation).
+Key WS methods (confirmed in `src/gateway/server-methods-list.ts` at v2026.5.7):
+- `chat.history` — fetch transcript for a session key; returns `sessionId` + message array. Bounded output; oversized entries replaced with placeholder.
+- `chat.send` — post a user message; params: `{sessionKey, sessionId?, message, idempotencyKey}`. Gateway streams reply events back over the WS connection.
+- `chat.abort` — cancel an in-flight generation. Maps to `Ctrl-C`.
 
-### Channel registration
+Reply streaming arrives as `chat` gateway events on the WS connection (same event bus as all other gateway pushes).
 
-`civitas-shell` registers itself as a first-class OpenClaw channel under `channels.civitasShell` in `openclaw.json`. The shell process talks to the gateway over the standard channel API; the gateway routes inbound messages into the agent's session and dispatches outbound replies back to the shell. Same pattern as Telegram / web.
+**Note:** `@openclaw/sdk` exists in the OpenClaw monorepo but is `private: true` and not published to npm. civitas-shell implements the WS protocol directly using the `ws` npm package — no private SDK dependency.
 
-This means heartbeats and agent-initiated messages can target civitas-shell as a delivery channel — useful later (e.g., a scheduled reminder showing up in-shell at boot).
+### Auth
 
-**Open implementation question:** does OpenClaw 2026.5.7 already expose a generic local-channel adapter, or do we need to ship one as part of this phase? **To verify with Alex / handbook before code.** If we need to ship one, scope grows: a small Node module registering `civitasShell` as a channel adapter inside the gateway. Track as a Phase 3 Phase-A deliverable.
+civitas-shell reads `gateway.auth.token` (or `gateway.auth.password`) from `~/.openclaw/openclaw.json` and passes it as the WS shared secret on connect. Loopback connections still require this credential per gateway default config. No per-channel bearer token; no new config fields.
 
-### Persistence
+### Sessions
 
-Each shell launch is one session. Transcripts stored at:
+Sessions are **gateway-owned and persistent**. On launch:
+1. civitas-shell calls `chat.history` with the agent's default session key (`agent:main:main`).
+2. Gateway returns the stored transcript + a `sessionId`.
+3. Shell renders the last N=50 messages as context, then prompts for input.
+4. Each `chat.send` includes the `sessionId` returned by step 2, so reconnects and relaunches continue the same conversation automatically.
 
-```
-~/.openclaw/workspace/civitas-shell/
-  transcripts/
-    2026-05-09T19-32-00Z.jsonl
-    2026-05-09T20-15-00Z.jsonl
-```
-
-JSONL: one record per message (`{ts, role, text}`). On launch, the most recent transcript is replayed into the screen (last N=50 messages, configurable). The agent's own session memory is owned by OpenClaw — civitas-shell's transcripts exist only so the user can see what was said.
+Crash/reattach is free — same behavior as Control UI. No client-side JSONL; the gateway JSONL is the canonical record.
 
 ---
 
@@ -143,27 +147,11 @@ Punted to v1: file attachments, image render, `/files`, history search, `/agent`
 
 When enabled, the installer:
 1. `npm install -g @civitasstudio/civitas-shell` (after Node is in place).
-2. Adds `channels.civitasShell` block to `openclaw.json`.
-3. Creates `~/.openclaw/workspace/civitas-shell/transcripts/` directory.
-4. Adds a `civitas-shell` binary on PATH.
+2. Adds a `civitas-shell` binary on PATH.
+
+That's it. No `openclaw.json` mutations — civitas-shell uses the existing gateway WS endpoint and reads auth from the config file that `install.sh` already writes. No new `channels.*` block needed.
 
 **Phase 4 will add** a `--boot-mode chat` flag that swaps `getty@tty1.service` for a unit that runs `civitas-shell` directly. Out of scope for Phase 3.
-
-`openclaw.json` block (added by installer):
-
-```json
-{
-  "channels": {
-    "civitasShell": {
-      "default": {
-        "enabled": true
-      }
-    }
-  }
-}
-```
-
-No bearer token, secret, or port config in this block — civitas-shell speaks to the gateway over loopback as the same UNIX user, and reuses `agents.defaults.bearerToken` (existing) for the channel API call.
 
 ---
 
@@ -187,12 +175,12 @@ Interactive on `bob` console:
 3. Run `whoami` → returns `bob`.
 4. `exit`. Civitas-shell resumes, transcript intact, input focus restored.
 
-### 3. Persistence
+### 3. Persistence / reconnect
 
 1. Launch `civitas-shell`, send "Remember the number 42."
 2. `/exit`.
-3. Launch `civitas-shell` again. Verify the previous exchange is replayed at top of transcript.
-4. Verify file `~/.openclaw/workspace/civitas-shell/transcripts/<ts>.jsonl` exists and contains both turns.
+3. Launch `civitas-shell` again. Verify the previous exchange is replayed at top of transcript via `chat.history`.
+4. Verify no new JSONL file is created by civitas-shell — history lives in the gateway session store only.
 
 ### 4. Cancellation mid-stream
 
@@ -219,14 +207,14 @@ Must print `loopback only`.
 ## Success Criteria (Phase 3 complete)
 
 1. ✅ `npm install -g @civitasstudio/civitas-shell` on Bob succeeds.
-2. ✅ `civitas-shell` launches, displays prompt, reads bearer token from `openclaw.json` without manual config.
+2. ✅ `civitas-shell` launches, connects to Gateway WS, reads auth from `openclaw.json` without manual config.
 3. ✅ Streaming round-trip with Bob works end-to-end. Response is persona-aware (Bob, gemma4:e2b).
 4. ✅ `/bash` escape and return works without losing transcript or input focus.
-5. ✅ Transcripts persist to `~/.openclaw/workspace/civitas-shell/transcripts/` and replay on next launch.
-6. ✅ `Ctrl-C` cancels in-flight generation without exiting the shell.
+5. ✅ Relaunch replays prior conversation via `chat.history`. No client-side JSONL created.
+6. ✅ `Ctrl-C` sends `chat.abort` and cancels in-flight generation without exiting the shell.
 7. ✅ Gateway-down state shows a clear, non-fatal error and recovers without re-typing.
 8. ✅ No non-loopback connections originate from the civitas-shell process during a session.
-9. ✅ `install.sh --with-civitas-shell` adds the channel block to `openclaw.json` and the binary to PATH.
+9. ✅ `install.sh --with-civitas-shell` installs the binary and puts it on PATH. No `openclaw.json` changes required.
 
 ---
 
@@ -244,11 +232,112 @@ Must print `loopback only`.
 
 ---
 
-## Open Items (resolve before Phase 3 implementation)
+## Open Items
 
-1. **Local-channel adapter.** Confirm whether OpenClaw 2026.5.7 already supports a generic `civitasShell`-style channel via existing local adapter, or whether Phase 3 must ship a small adapter module. **Owner:** Wayland to verify against handbook + gateway source on Forge. If new adapter needed, treat as Phase 3-A deliverable before the shell client itself.
-2. **Bearer token field.** Confirm exact field name in `openclaw.json` / how channels authenticate to the gateway over loopback. May need none if gateway trusts loopback connections from same UID.
-3. **Session ID semantics.** One session per launch (current design) vs. one persistent session that survives relaunches. Persistent is more "agent-OS"-shaped but complicates session pruning. **Recommend one-per-launch in v0**, with relaunch transcript replay closing the UX gap. Revisit if it feels wrong on Bob.
+All three original open items resolved on 2026-05-10 via Forge source inspection (v2026.5.7 tag):
+
+1. **Local-channel adapter** → closed. WebChat WS (`chat.send` / `chat.history` / `chat.abort`) is built into the Gateway. No adapter needed, Phase 3-A dropped.
+2. **Bearer token field** → closed. Auth is `gateway.auth.token` / `gateway.auth.password` (shared secret). Loopback requires it. No new config fields.
+3. **Session semantics** → closed. Persistent gateway-owned sessions via `sessionId` from `chat.history`. One-per-launch design dropped.
+
+**Gate status (2026-05-10):**
+- (1) SSE→WS line — ✅ already correct in spec (§UX/Streaming already read "WebSocket connection").
+- (2) Slash command set flip — ✅ John approved 2026-05-10.
+- (3) Smoke test — ✅ closed by Alex. `agent-send` WS round-trip against Bob verified: endpoint up, auth works on loopback, persistent session confirmed, streaming end-to-end pass. Wall time 3m35s on gemma4:e2b CPU — expected. See `inbox/2026-05-10-bob-smoke-result.md` for full results.
+
+---
+
+## Sub-step Delivery
+
+Phase 3 is delivered in five sequential sub-steps. Each ends with a real on-Bob verification before the next begins. Ping Alex at the end of each sub-step.
+
+**Process rules:**
+- Verification is the deliverable, not a nice-to-have. Don't skip it to compress the schedule.
+- If a tool call needs >90s of agent silence, kick it off async and check next turn — the gateway kills at 90s and will loop the session. (Phase 1 lesson, reinforced today.)
+- Do not depend on the private `@openclaw/sdk` module — implement the WS protocol directly with the `ws` npm package. Use OpenClaw CLI source under `/usr/lib/node_modules/openclaw/dist/` as the envelope-shape reference.
+
+---
+
+### 3a — WS client core (~1 day)
+
+**Scope:**
+- npm package skeleton (`@civitasstudio/civitas-shell`, MIT, private scope to start).
+- WS connect to `ws://127.0.0.1:18789`, auth via `gateway.auth.token` from `~/.openclaw/openclaw.json`.
+- Implement `chat.history`, `chat.send` (with `idempotencyKey`), `chat.abort`.
+- `--noninteractive --send <text>` mode — sends one message, streams reply tokens to stdout, exits.
+- No UI yet. Plain stdout output.
+
+**Reference:** `~/bin/agent-send` is a 70-line bash wrapper over the same round-trip — read it for the protocol pattern.
+
+**Verify (→ spec test #1):**
+- `civitas-shell --noninteractive --send "Hello, who are you?"` against Bob streams a reply identifying as Bob / `gemma4:e2b`.
+- Re-run with same `idempotencyKey` does **not** double-send.
+- `journalctl --user -u openclaw-gateway` on Bob shows no non-loopback traffic.
+
+---
+
+### 3b — Ink TUI (~1–2 days)
+
+**Scope:**
+- Transcript region (scrollable, fills terminal minus input row).
+- Single-line input row; Shift-Enter grows up to 5 rows.
+- Speaker labels (`Bob` / `You`) bold, messages indented 2 spaces.
+- Streaming token render into active speaker block.
+- Status overlay: `thinking ●●●` (animated); red errors on gateway failure.
+- Key bindings per spec §Keys.
+- Transcript replay at launch via `chat.history` (last 50 messages).
+
+**Verify (→ spec tests #3, #4, #5):**
+- Interactive launch on Bob's console — token-by-token rendering works.
+- Mid-stream `Ctrl-C` cancels, status clears, input returns, shell does not exit.
+- `systemctl --user stop openclaw-gateway` → red status; restart → next send works without re-typing.
+- Relaunch — prior conversation appears at top.
+
+---
+
+### 3c — Slash commands, non-bash (~½ day)
+
+**Scope:**
+- `/clear`, `/model`, `/help`, `/exit` (with `--login-shell` flag gate that disables `/exit`; default off).
+- Slash detection: input begins with `/`, no spaces before word boundary. `\/foo` sends literal slash-prefix to agent.
+
+**Verify:**
+- Each command matches its spec table row.
+- `\/help` literal reaches the agent, not the help dispatcher.
+
+---
+
+### 3d — `/bash` PTY escape (~1 day) — TRICKIEST
+
+**Scope:**
+- `/bash` spawns `$SHELL` (or `/bin/bash`) as child PTY taking over the terminal.
+- Ink rendering suspends; child PTY has full terminal control.
+- On child exit: transcript intact, input focus restored, terminal mode restored cleanly.
+
+**Gnarly bits to handle:** signal forwarding, `tcsetattr` save/restore around the child, ink unmount/remount lifecycle, `SIGWINCH` re-propagation on resize. Test in a real TTY, not an IDE pseudoterminal.
+
+**Verify (→ spec test #2):**
+- Launch, type `/bash`, get a real bash prompt. `whoami` → `bob`. `exit` → civitas-shell resumes, transcript intact.
+- Terminal echo + line-discipline normal after return.
+- Send a message after returning — streaming still works; no zombies in `ps`.
+
+---
+
+### 3e — Install integration (~½ day)
+
+**Scope:**
+- `install.sh --with-civitas-shell` flag (default off Phase 3; default on Phase 4 ISO).
+- When enabled: `npm install -g @civitasstudio/civitas-shell` after Node is installed.
+- `civitas-shell` binary on PATH. No `openclaw.json` mutations. Idempotent.
+
+**Verify (→ spec test #6):**
+- Fresh Ubuntu 26.04 libvirt VM on Forge (preserve Alex's pubkey if Bob is reused).
+- `install.sh --with-civitas-shell` from scratch → `civitas-shell --noninteractive --send "hi"` works.
+- `ss -tnp | grep -v '127.0.0.1\|::1' | grep civitas-shell` returns nothing.
+
+---
+
+**Total estimate:** ~4–5 days.
 
 ---
 
@@ -258,3 +347,6 @@ Must print `loopback only`.
 - Phase 2 spec: [`docs/v0-phase2-bob-spec.md`](v0-phase2-bob-spec.md)
 - OpenClaw essentials: `~/.openclaw/workspace/handbook/openclaw-essentials.md`
 - ink (TUI library): https://github.com/vadimdemedes/ink
+- Gateway WS methods source: `src/gateway/server-methods-list.ts` (OpenClaw v2026.5.7)
+- Gateway WS chat handler: `src/gateway/server-methods/chat.ts`
+- WebChat docs: `docs/web/webchat.md`
