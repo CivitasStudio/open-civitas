@@ -36,11 +36,32 @@ function estimateLines(text, cols) {
 }
 
 function readAgentName() {
+  const base = join(homedir(), '.openclaw', 'workspace');
+
+  // 1. Table-cell schema: | Name | Bob | in IDENTITY.md
+  let identity = null;
   try {
-    const content = readFileSync(join(homedir(), '.openclaw', 'workspace', 'IDENTITY.md'), 'utf8');
-    const match = content.match(/^#\s+I am\s+(.+)$/mi) || content.match(/^#\s+(.+)$/m);
-    if (match) return match[1].trim();
+    identity = readFileSync(join(base, 'IDENTITY.md'), 'utf8');
+    const m = identity.match(/^\|\s*Name\s*\|\s*([^|\n]+?)\s*\|/m);
+    if (m) return m[1].trim();
   } catch {}
+
+  // 2. "I am <Name>" prose in SOUL.md
+  try {
+    const soul = readFileSync(join(base, 'SOUL.md'), 'utf8');
+    const m = soul.match(/I am\s+([A-Z][A-Za-z0-9_-]*)/);
+    if (m) return m[1];
+  } catch {}
+
+  // 3. First heading in IDENTITY.md — sanity-filter file-title headings
+  if (identity) {
+    const m = identity.match(/^#\s+(.+)$/m);
+    if (m) {
+      const name = m[1].trim();
+      if (!/\.md|Profile|Factual|Document|File|Identity/i.test(name)) return name;
+    }
+  }
+
   try { return userInfo().username; } catch {}
   return 'agent';
 }
@@ -226,6 +247,14 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
     const cmd = raw.slice(1).split(/\s+/)[0].toLowerCase();
 
     if (cmd === 'clear') {
+      // Alias to gateway /new — destructive reset, persists across launches.
+      // Fire-and-forget; local clear always happens regardless.
+      gw.request('chat.send', {
+        sessionKey: SESSION_KEY,
+        sessionId,
+        message: '/new',
+        idempotencyKey: randomUUID(),
+      }, { timeoutMs: 10_000 }).catch(() => {});
       setMessages([]);
       setScrollOffset(0);
       return true;
@@ -243,7 +272,7 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
     }
 
     return false; // pass through to gateway
-  }, [doExit, exit, onBashEscape]);
+  }, [gw, sessionId, doExit, exit, onBashEscape]);
 
   const sendMessage = useCallback(() => {
     const raw = inputText.trim();
