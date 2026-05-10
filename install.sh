@@ -31,8 +31,9 @@ NON_INTERACTIVE=0
 AGENT_NAME=""
 AGENT_ROLE=""
 USER_NAME=""
-INSTALL_CLAUDE_CLI=""   # "y", "n", or "" (ask)
-INSTALL_OLLAMA=""       # "y", "n", or "" (ask)
+INSTALL_CLAUDE_CLI=""        # "y", "n", or "" (ask)
+INSTALL_OLLAMA=""            # "y", "n", or "" (ask)
+INSTALL_CIVITAS_SHELL=""     # "y", "n", or "" (ask)
 
 usage() {
     cat <<EOF
@@ -45,6 +46,7 @@ Options:
   --user USER                 Principal / owner name
   --claude-cli [y|n]          Install Claude Code CLI (default: ask)
   --ollama [y|n]              Install Ollama (default: ask)
+  --with-civitas-shell        Install civitas-shell chat TUI (default: ask)
   --help                      Show this help
 
 EOF
@@ -56,8 +58,9 @@ while [[ $# -gt 0 ]]; do
         --agent-name)  AGENT_NAME="$2";  shift ;;
         --agent-role)  AGENT_ROLE="$2";  shift ;;
         --user)        USER_NAME="$2";   shift ;;
-        --claude-cli)  INSTALL_CLAUDE_CLI="$2"; shift ;;
-        --ollama)      INSTALL_OLLAMA="$2";     shift ;;
+        --claude-cli)         INSTALL_CLAUDE_CLI="$2"; shift ;;
+        --ollama)             INSTALL_OLLAMA="$2";     shift ;;
+        --with-civitas-shell) INSTALL_CIVITAS_SHELL="y" ;;
         --help) usage; exit 0 ;;
         *) log_error "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -78,6 +81,8 @@ source "${SCRIPT_DIR}/lib/workspace.sh"
 source "${SCRIPT_DIR}/lib/install-claude-cli.sh"
 # shellcheck source=lib/install-ollama.sh
 source "${SCRIPT_DIR}/lib/install-ollama.sh"
+# shellcheck source=lib/install-civitas-shell.sh
+source "${SCRIPT_DIR}/lib/install-civitas-shell.sh"
 
 # ── Step 1: Preflight ─────────────────────────────────────────────────────────
 
@@ -144,6 +149,7 @@ gather_optional_installs() {
     if [[ "$NON_INTERACTIVE" == "1" ]]; then
         INSTALL_CLAUDE_CLI="${INSTALL_CLAUDE_CLI:-n}"
         INSTALL_OLLAMA="${INSTALL_OLLAMA:-n}"
+        INSTALL_CIVITAS_SHELL="${INSTALL_CIVITAS_SHELL:-n}"
         return 0
     fi
 
@@ -160,6 +166,11 @@ gather_optional_installs() {
         read -r -p "  Install Ollama (local/offline models)? [y/N]: " INSTALL_OLLAMA
         INSTALL_OLLAMA="${INSTALL_OLLAMA:-n}"
     fi
+
+    if [[ -z "$INSTALL_CIVITAS_SHELL" ]]; then
+        read -r -p "  Install civitas-shell chat TUI? [y/N]: " INSTALL_CIVITAS_SHELL
+        INSTALL_CIVITAS_SHELL="${INSTALL_CIVITAS_SHELL:-n}"
+    fi
     log_info ""
 }
 
@@ -170,33 +181,42 @@ main() {
     gather_inputs
     gather_optional_installs
 
-    log_info "Step 1/5: Installing substrate (Node, OpenClaw, systemd, linger)…"
+    log_info "Step 1/6: Installing substrate (Node, OpenClaw, systemd, linger)…"
     install_substrate
 
     log_info ""
-    log_info "Step 2/5: Setting up workspace skeleton…"
+    log_info "Step 2/6: Setting up workspace skeleton…"
     setup_workspace
 
     if [[ "${INSTALL_CLAUDE_CLI,,}" == "y"* ]]; then
         log_info ""
-        log_info "Step 3/5: Installing Claude Code CLI…"
+        log_info "Step 3/6: Installing Claude Code CLI…"
         install_claude_cli
     else
         log_info ""
-        log_info "Step 3/5: Skipping Claude Code CLI."
+        log_info "Step 3/6: Skipping Claude Code CLI."
     fi
 
     if [[ "${INSTALL_OLLAMA,,}" == "y"* ]]; then
         log_info ""
-        log_info "Step 4/5: Installing Ollama…"
+        log_info "Step 4/6: Installing Ollama…"
         install_ollama
     else
         log_info ""
-        log_info "Step 4/5: Skipping Ollama."
+        log_info "Step 4/6: Skipping Ollama."
+    fi
+
+    if [[ "${INSTALL_CIVITAS_SHELL,,}" == "y"* ]]; then
+        log_info ""
+        log_info "Step 5/6: Installing civitas-shell…"
+        install_civitas_shell
+    else
+        log_info ""
+        log_info "Step 5/6: Skipping civitas-shell."
     fi
 
     log_info ""
-    log_info "Step 5/5: Starting OpenClaw gateway…"
+    log_info "Step 6/6: Starting OpenClaw gateway…"
     start_gateway
 
     log_info ""
