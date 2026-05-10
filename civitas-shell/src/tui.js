@@ -1,19 +1,21 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { render, Box, Text, useInput, useApp, useStdout } from 'ink';
 import { randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { homedir, userInfo } from 'os';
+import { join } from 'path';
 import { GatewayClient } from './gateway.js';
 import { loadConfig } from './config.js';
+import { LABEL, STATUS, GREETING, DIM } from './theme.js';
 
 const h = React.createElement;
 
-// FIXME(v1): session key hardcoded; v1 multi-agent story needs this configurable
 const SESSION_KEY = 'agent:main:main';
 const HISTORY_LIMIT = 50;
 const MAX_INPUT_ROWS = 5;
+const BRAILLE_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
 
-// Gateway deltas are cumulative — each delta payload contains the full text so
-// far, not just the newest fragment. Callers must slice to get the increment.
 function extractText(message) {
   if (!message) return '';
   const content = message.content;
@@ -27,81 +29,84 @@ function extractText(message) {
   return '';
 }
 
-// Rough line-count estimate for a string at a given terminal width.
 function estimateLines(text, cols) {
   if (!text) return 0;
-  const usable = Math.max(cols - 4, 20); // 2-space indent + margin
+  const usable = Math.max(cols - 4, 20);
   return text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / usable)), 0);
 }
 
-// Suspend ink, hand the terminal to $SHELL, then return.
-// Saves/restores terminal raw mode around the child so ink can resume cleanly.
+function readAgentName() {
+  try {
+    const content = readFileSync(join(homedir(), '.openclaw', 'workspace', 'IDENTITY.md'), 'utf8');
+    const match = content.match(/^#\s+I am\s+(.+)$/mi) || content.match(/^#\s+(.+)$/m);
+    if (match) return match[1].trim();
+  } catch {}
+  try { return userInfo().username; } catch {}
+  return 'agent';
+}
+
 async function spawnBash() {
   const shell = process.env.SHELL || '/bin/bash';
-
-  // ink left the terminal in raw mode; restore to cooked before handing off
   if (process.stdin.isTTY) {
     try { process.stdin.setRawMode(false); } catch {}
   }
-  // pause Node.js's stdin read loop so the child gets exclusive access
   process.stdin.pause();
-
   await new Promise((resolve) => {
     const child = spawn(shell, [], {
       stdio: 'inherit',
       env: { ...process.env, TERM: process.env.TERM || 'xterm-256color' },
     });
-
-    // Forward resize signals to child so interactive programs inside bash
-    // (vim, less, etc.) hear about terminal resizes.
     const onWinch = () => { try { child.kill('SIGWINCH'); } catch {} };
     process.on('SIGWINCH', onWinch);
-
-    const cleanup = () => {
-      process.off('SIGWINCH', onWinch);
-      resolve();
-    };
+    const cleanup = () => { process.off('SIGWINCH', onWinch); resolve(); };
     child.on('exit', cleanup);
-    child.on('error', cleanup); // spawn failure (shell missing)
+    child.on('error', cleanup);
   });
-
-  // Give stdin back; ink will set raw mode again on re-render
   process.stdin.resume();
 }
 
 // --- Components ---
 
-function ThinkingDots({ state }) {
+function ThinkingSpinner({ state, startedAt }) {
   const [frame, setFrame] = useState(0);
-  const frames = ['●', '●●', '●●●'];
+  const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (state !== 'thinking' && state !== 'streaming') return;
-    const t = setInterval(() => setFrame(f => (f + 1) % frames.length), 400);
-    return () => clearInterval(t);
-  }, [state]);
+    const spin = setInterval(() => setFrame(f => (f + 1) % BRAILLE_FRAMES.length), 80);
+    const tick = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => { clearInterval(spin); clearInterval(tick); };
+  }, [state, startedAt]);
   if (state !== 'thinking' && state !== 'streaming') return null;
   const label = state === 'thinking' ? 'thinking' : 'streaming';
-  return h(Text, { dimColor: true }, `${label} ${frames[frame]}`);
+  return h(Text, { color: STATUS }, `${BRAILLE_FRAMES[frame]} ${label} • ${elapsed}s`);
 }
 
 function MessageBlock({ role, text }) {
   if (role === 'system') {
     return h(Box, { flexDirection: 'column', marginBottom: 1 },
       h(Box, { paddingLeft: 2 },
-        h(Text, { dimColor: true, wrap: 'wrap' }, text ?? '')
+        h(Text, { color: DIM, wrap: 'wrap' }, text ?? '')
       )
     );
   }
   const label = role === 'user' ? 'You' : 'Bob';
   return h(Box, { flexDirection: 'column', marginBottom: 1 },
-    h(Text, { bold: true }, label),
+    h(Text, { bold: true, color: LABEL }, label),
     h(Box, { paddingLeft: 2 },
       h(Text, { wrap: 'wrap' }, text ?? '')
     )
   );
 }
 
-function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscape }) {
+function GreetingBlock({ text }) {
+  return h(Box, { flexDirection: 'column', marginBottom: 1 },
+    h(Box, { paddingLeft: 2 },
+      h(Text, { color: GREETING, wrap: 'wrap' }, text)
+    )
+  );
+}
+
+function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscape, greeting, greetingLines }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termRows = stdout?.rows ?? 24;
@@ -112,10 +117,12 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
   const [inputRows, setInputRows] = useState(1);
   const [status, setStatus] = useState('idle'); // idle | thinking | streaming | error | disconnected
   const [statusMsg, setStatusMsg] = useState('');
-  const [scrollOffset, setScrollOffset] = useState(0); // messages from end to skip
+  const [scrollOffset, setScrollOffset] = useState(0);
   const [sessionId] = useState(initialSessionId);
+  const [runStartedAt, setRunStartedAt] = useState(Date.now());
+  const [exitConfirmAt, setExitConfirmAt] = useState(null);
+  const exitConfirmTimerRef = useRef(null);
   const activeRunIdRef = useRef(null);
-  // Stable ref so slash-command callbacks always see latest messages
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
@@ -132,7 +139,6 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
         setMessages(prev => {
           const idx = prev.findIndex(m => m.runId === evt.runId);
           if (idx === -1) {
-            // New streaming block
             return [...prev, { id: evt.runId, role: 'assistant', text, runId: evt.runId, isStreaming: true }];
           }
           const next = [...prev];
@@ -196,65 +202,48 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
     return () => { gw.off('event', onEvent); gw.off('close', onClose); gw.off('reconnect', onReconnect); };
   }, [gw]);
 
+  const clearExitConfirm = useCallback(() => {
+    if (exitConfirmTimerRef.current) clearTimeout(exitConfirmTimerRef.current);
+    exitConfirmTimerRef.current = null;
+    setExitConfirmAt(null);
+  }, []);
+
   const addSystemMessage = useCallback((text) => {
     setMessages(prev => [...prev, { id: randomUUID(), role: 'system', text }]);
     setScrollOffset(0);
   }, []);
 
+  const doExit = useCallback(() => {
+    if (loginShell) {
+      addSystemMessage('exit is disabled in login-shell mode');
+      return;
+    }
+    exit();
+  }, [loginShell, exit, addSystemMessage]);
+
+  // Returns true if command was handled locally; false means forward to gateway.
   const handleSlashCommand = useCallback((raw) => {
-    // First word after the slash, lower-cased. Args ignored in v0.
     const cmd = raw.slice(1).split(/\s+/)[0].toLowerCase();
 
     if (cmd === 'clear') {
       setMessages([]);
       setScrollOffset(0);
-      return;
-    }
-
-    if (cmd === 'help') {
-      addSystemMessage(
-        '/bash    drop to shell (exit to return)\n' +
-        '/clear   clear visible transcript\n' +
-        '/model   show current model and gateway status\n' +
-        '/help    show this message\n' +
-        '/exit    exit civitas-shell\n' +
-        '  tip: prefix / with \\ to send literally to agent (e.g. \\/help)'
-      );
-      return;
+      return true;
     }
 
     if (cmd === 'exit') {
-      if (loginShell) {
-        addSystemMessage('/exit is disabled in login-shell mode');
-        return;
-      }
-      exit();
-      return;
-    }
-
-    if (cmd === 'model') {
-      const gwStatus = status === 'disconnected' ? 'disconnected' : 'connected';
-      gw.request('session.status', { sessionKey: SESSION_KEY }, { timeoutMs: 5_000 })
-        .then(info => {
-          const model = info?.model || info?.agentModel || info?.runtime?.model || 'unknown';
-          addSystemMessage(`gateway: ${gwStatus}  session: ${SESSION_KEY}  model: ${model}`);
-        })
-        .catch(() => {
-          addSystemMessage(`gateway: ${gwStatus}  session: ${SESSION_KEY}  model: unknown`);
-        });
-      return;
+      doExit();
+      return true;
     }
 
     if (cmd === 'bash') {
-      // Pass current messages snapshot to launchTUI so transcript survives
-      // the ink unmount/remount cycle.
       onBashEscape(messagesRef.current);
       exit();
-      return;
+      return true;
     }
 
-    addSystemMessage(`unknown command: ${raw}  (type /help for commands)`);
-  }, [gw, status, loginShell, exit, addSystemMessage, onBashEscape]);
+    return false; // pass through to gateway
+  }, [doExit, exit, onBashEscape]);
 
   const sendMessage = useCallback(() => {
     const raw = inputText.trim();
@@ -262,10 +251,13 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
 
     // Slash command: starts with / but not \/ (escaped literal)
     if (raw.startsWith('/') && !raw.startsWith('\\/')) {
-      setInputText('');
-      setInputRows(1);
-      handleSlashCommand(raw);
-      return;
+      const handled = handleSlashCommand(raw);
+      if (handled) {
+        setInputText('');
+        setInputRows(1);
+        return;
+      }
+      // Not a local command — fall through to forward to gateway as-is
     }
 
     if (status === 'thinking' || status === 'streaming') return;
@@ -280,6 +272,7 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
     setInputText('');
     setInputRows(1);
     setStatus('thinking');
+    setRunStartedAt(Date.now());
     setScrollOffset(0);
 
     gw.request('chat.send', {
@@ -303,37 +296,49 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
   }, [gw]);
 
   useInput((input, key) => {
-    // Ctrl-C: abort in-flight generation; do not exit
     if (key.ctrl && input === 'c') {
-      if (status === 'thinking' || status === 'streaming') abortRun();
+      if (status === 'thinking' || status === 'streaming') {
+        abortRun();
+        return;
+      }
+      // Idle: double Ctrl-C to exit
+      const now = Date.now();
+      if (exitConfirmAt !== null && now - exitConfirmAt < 2000) {
+        clearExitConfirm();
+        doExit();
+      } else {
+        clearExitConfirm();
+        setExitConfirmAt(now);
+        exitConfirmTimerRef.current = setTimeout(() => {
+          setExitConfirmAt(null);
+          exitConfirmTimerRef.current = null;
+        }, 2000);
+      }
       return;
     }
-    // Ctrl-L: clear visible transcript (gateway history unaffected)
+
+    // Any non-Ctrl-C key dismisses the exit-confirm hint
+    if (exitConfirmAt !== null) clearExitConfirm();
+
     if (key.ctrl && input === 'l') {
       setMessages([]);
       setScrollOffset(0);
       return;
     }
-    // Ctrl-D on empty: no-op
     if (key.ctrl && input === 'd') return;
 
-    // PgUp / PgDn (scroll in message units)
     if (key.pageUp) { setScrollOffset(o => o + 4); return; }
     if (key.pageDown) { setScrollOffset(o => Math.max(0, o - 4)); return; }
 
-    // Shift-Enter: insert newline, grow input up to MAX_INPUT_ROWS
     if (key.return && key.shift) {
       setInputText(t => t + '\n');
       setInputRows(r => Math.min(r + 1, MAX_INPUT_ROWS));
       return;
     }
-    // Enter: send or dispatch slash command
     if (key.return) { sendMessage(); return; }
 
-    // Backspace / Delete
     if (key.backspace || key.delete) {
       setInputText(t => t.slice(0, -1));
-      // shrink input rows if we deleted a newline
       setInputRows(r => {
         const newlines = inputText.slice(0, -1).split('\n').length;
         return Math.max(1, Math.min(r, newlines));
@@ -341,51 +346,50 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
       return;
     }
 
-    // Printable character
     if (input && !key.ctrl && !key.meta) setInputText(t => t + input);
   });
 
   // --- Viewport calculation ---
-  const hasStatus = status !== 'idle';
-  const statusHeight = hasStatus ? 1 : 0;
-  // input: prompt line + extra rows beyond first
+  const showingStatus = status !== 'idle' || exitConfirmAt !== null;
+  const statusHeight = showingStatus ? 1 : 0;
   const inputHeight = inputRows;
-  const transcriptHeight = Math.max(3, termRows - inputHeight - statusHeight - 1);
+  const greetingHeight = greetingLines + 1; // lines of text + marginBottom
+  const transcriptHeight = Math.max(3, termRows - inputHeight - statusHeight - greetingHeight - 1);
 
-  // Build a line-count-aware visible slice from the end of messages,
-  // respecting scrollOffset (in message units).
   const endIdx = messages.length - scrollOffset;
   let startIdx = endIdx;
   let linesUsed = 0;
   while (startIdx > 0) {
     const m = messages[startIdx - 1];
-    // system messages: no label line, just content
     const labelLines = m.role === 'system' ? 0 : 1;
-    const mLines = labelLines + 1 + estimateLines(m.text, termCols); // label + blank + content
+    const mLines = labelLines + 1 + estimateLines(m.text, termCols);
     if (linesUsed + mLines > transcriptHeight) break;
     linesUsed += mLines;
     startIdx--;
   }
   const visibleMessages = messages.slice(Math.max(0, startIdx), Math.max(0, endIdx));
 
-  // Input display: show last line of multi-line input with a block cursor
   const inputLines = inputText.split('\n');
   const displayInput = inputLines[inputLines.length - 1] + '█';
 
+  // Build status line content
+  let statusContent = null;
+  if (status === 'thinking' || status === 'streaming') {
+    statusContent = h(ThinkingSpinner, { state: status, startedAt: runStartedAt });
+  } else if (status === 'error' || status === 'disconnected') {
+    statusContent = h(Text, { color: 'red' }, statusMsg);
+  } else if (exitConfirmAt !== null) {
+    statusContent = h(Text, { color: DIM }, '(Ctrl-C again to exit)');
+  }
+
   return h(Box, { flexDirection: 'column' },
-    // Transcript
+    h(GreetingBlock, { text: greeting }),
     h(Box, { flexDirection: 'column', height: transcriptHeight, overflow: 'hidden' },
       ...visibleMessages.map(m =>
         h(MessageBlock, { key: m.id, role: m.role, text: m.text })
       )
     ),
-    // Status overlay (thinking animation or error)
-    hasStatus && h(Box, null,
-      status === 'thinking' || status === 'streaming'
-        ? h(ThinkingDots, { state: status })
-        : h(Text, { color: 'red' }, statusMsg)
-    ),
-    // Input row
+    showingStatus && h(Box, null, statusContent),
     h(Box, null,
       h(Text, { color: 'green' }, '> '),
       h(Text, null, displayInput)
@@ -410,10 +414,29 @@ export async function launchTUI(opts = {}) {
   });
   const sessionId = histResult?.sessionId;
 
-  // currentMessages carries transcript state across /bash escapes so the
-  // transcript survives ink unmount/remount cycles.
+  const agentName = readAgentName();
+  const model = cfg.model ?? 'unknown';
+  const greetingText =
+    `Hi, I'm ${agentName}.\n\n` +
+    `- Using: ${model}.\n` +
+    `- Gateway: connected (${cfg.gatewayUrl}).\n` +
+    `- Session: ${SESSION_KEY}, persisted across launches.`;
+  const greetingLines = greetingText.split('\n').length;
+
+  // currentMessages carries transcript across /bash escapes (ink unmount/remount).
   let currentMessages = (histResult?.messages ?? [])
     .filter(m => m.role === 'user' || m.role === 'assistant')
+    // Collapse consecutive identical user messages (gateway LLM-idle retry artifacts)
+    .reduce((acc, msg) => {
+      if (acc.length > 0) {
+        const last = acc[acc.length - 1];
+        if (msg.role === 'user' && last.role === 'user' && extractText(msg) === extractText(last)) {
+          return acc;
+        }
+      }
+      acc.push(msg);
+      return acc;
+    }, [])
     .map((m, i) => ({
       id: String(i),
       role: m.role,
@@ -434,13 +457,15 @@ export async function launchTUI(opts = {}) {
           bashEscaped = true;
           currentMessages = msgs;
         },
+        greeting: greetingText,
+        greetingLines,
       }),
       { exitOnCtrlC: false }
     );
 
     await waitUntilExit();
 
-    if (!bashEscaped) break; // normal exit (/exit or process signal)
+    if (!bashEscaped) break; // normal exit (/exit or double Ctrl-C)
 
     await spawnBash();
     // loop to re-render ink with preserved transcript

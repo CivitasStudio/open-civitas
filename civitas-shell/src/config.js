@@ -16,5 +16,6 @@ export function loadConfig() {
     throw new Error('No gateway.auth.token or gateway.auth.password in openclaw.json');
   }
   const gatewayUrl = raw?.gateway?.remote?.url ?? 'ws://127.0.0.1:18789';
-  return { token, password, gatewayUrl };
+  const model = raw?.agents?.defaults?.model?.primary ?? null;
+  return { token, password, gatewayUrl, model };
 }
