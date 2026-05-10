@@ -7,6 +7,8 @@
     "civitas-shell": "./bin/civitas-shell.js"
   },
   "dependencies": {
+    "ink": "^5.1.0",
+    "react": "^18.3.0",
     "ws": "^8.18.0"
   },
   "engines": {

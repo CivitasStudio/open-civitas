@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { GatewayClient } from './gateway.js';
 import { loadConfig } from './config.js';
 
+// FIXME(v1): session key hardcoded; v1 multi-agent story needs this configurable
 const SESSION_KEY = 'agent:main:main';
 
 function extractText(message) {
@@ -49,6 +50,8 @@ export async function noninteractiveSend(text) {
 
     if (evt.state === 'delta') {
       const text = extractText(evt.message);
+      // Gateway deltas are cumulative, not incremental — each delta contains
+      // the full text so far. Only write the newly-appended portion.
       if (text && text.length > lastText.length) {
         process.stdout.write(text.slice(lastText.length));
         lastText = text;

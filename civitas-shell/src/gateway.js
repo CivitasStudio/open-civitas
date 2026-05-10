@@ -97,6 +97,7 @@ export class GatewayClient extends EventEmitter {
       caps: [],
       auth,
       role: 'operator',
+      // FIXME(v1): scope list hardcoded; update if OpenClaw adds scopes civitas-shell needs
       scopes: ["operator.admin","operator.read","operator.write","operator.approvals","operator.pairing","operator.talk.secrets"],
     });
   }
