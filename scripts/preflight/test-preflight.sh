@@ -38,11 +38,11 @@ run_default() {
     echo "=== scenario: default (English / testuser / ollama+gemma-local) ==="
     rm -f "$OUTFILE"
 
-    expect -f - <<'EXPECT'
+    PREFLIGHT_PY="$PREFLIGHT" expect -f - <<'EXPECT'
 set timeout 15
 set env(TERM) xterm
 
-spawn python3 /home/wayland/open-civitas/scripts/preflight/preflight.py --test-mode
+spawn python3 $env(PREFLIGHT_PY) --test-mode
 
 # Step 1: Language — dialog --menu, default "en" highlighted; press Enter
 expect "Step 1 of 3"
@@ -81,11 +81,11 @@ run_oauth() {
     echo "=== scenario: oauth (English / authuser / anthropic-cli) ==="
     rm -f "$OUTFILE"
 
-    expect -f - <<'EXPECT'
+    PREFLIGHT_PY="$PREFLIGHT" expect -f - <<'EXPECT'
 set timeout 15
 set env(TERM) xterm
 
-spawn python3 /home/wayland/open-civitas/scripts/preflight/preflight.py --test-mode
+spawn python3 $env(PREFLIGHT_PY) --test-mode
 
 # Step 1: Language — accept default (English)
 expect "Step 1 of 3"
