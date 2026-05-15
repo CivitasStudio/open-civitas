@@ -9,6 +9,39 @@
 - Access to a test Ubuntu 26.04 VM (local or Forge)
 - `jq` (for config validation)
 
+### ISO Build Host Requirements (Phase 4+)
+
+The following packages must be installed on the **build host** (Forge or wherever `tools/build-iso.sh` runs).  They are not needed just to run the test suite.
+
+```bash
+sudo apt-get install -y xorriso squashfs-tools wget dialog expect
+```
+
+| Package | Used for |
+|---|---|
+| `xorriso` | ISO manipulation (grub.cfg replacement, adding casper overlay) |
+| `squashfs-tools` | Building `civitas.squashfs` overlay (`mksquashfs`) |
+| `wget` | Downloading base Ubuntu ISO if not cached |
+| `dialog` | Pre-flight TUI test suite (`scripts/preflight/test-preflight.sh`) |
+| `expect` | Driving the pre-flight TUI in automated tests |
+
+`dialog` is also bundled inside `civitas.squashfs` so it is available in the live installer environment (it is not in the default Ubuntu 26.04 live squashfs).
+
+### ISO Build Quick Start
+
+```bash
+# Build the ISO (downloads Ubuntu 26.04 base on first run — ~1.5 GB)
+tools/build-iso.sh --output dist/opencivitas-test.iso
+
+# Verify bootable structure
+xorriso -indev dist/opencivitas-test.iso -report_el_torito plain
+
+# Run the E2E install test (4f, once implemented)
+tests/e2e/install-test.sh --iso dist/opencivitas-test.iso
+```
+
+The base Ubuntu ISO is cached in `dist/cache/` after the first download.  Pass `--base-iso /path/to/ubuntu.iso` to use a pre-downloaded copy.
+
 ### Quick Test Locally
 
 If you have a Ubuntu 26.04 VM available (local libvirt, Proxmox, etc.):
