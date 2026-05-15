@@ -16,7 +16,7 @@ import os
 import sys
 
 DEFAULT_PREFLIGHT = "/run/civitas/preflight.json"
-DEFAULT_OUTPUT = "/run/civitas/autoinstall.yaml"
+DEFAULT_OUTPUT = "/run/civitas/user-data"  # nocloud datasource expects this filename
 
 LOCALE_MAP = {
     "en": "en_US.UTF-8",
@@ -41,7 +41,7 @@ KEYBOARD_MAP = {
 }
 
 # Template — rendered as a plain string to avoid a PyYAML dependency.
-# %(...) placeholders filled by % operator.
+# %(...) placeholders filled by % operator.  Use %% for a literal %.
 TEMPLATE = """\
 version: 1
 locale: %(locale)s
@@ -50,9 +50,10 @@ keyboard:
 identity:
   hostname: %(name)s
   username: %(name)s
-  # No password set here; civitas-firstboot.service presents the optional
-  # password dialog before handing over the console.
-  password: ''
+  # Locked password — no interactive password login.  Auto-login via tty1
+  # drop-in (configured in late-commands) provides console access.
+  # civitas-firstboot.service presents an optional passwd dialog at first boot.
+  password: '!'
   realname: %(name)s
 ssh:
   install-server: false
@@ -61,25 +62,28 @@ storage:
     name: lvm
 packages: []
 late-commands:
-  # Write the preflight config into the installed system.
-  - |
-    mkdir -p /target/etc/civitas
-    cp /run/civitas/preflight.json /target/etc/civitas/preflight.json
-  # Run the civitas installer (install.sh --with-civitas-shell) inside the
-  # installed target.  install.sh is baked into the ISO overlay.
-  - curtin in-target -- bash /cdrom/civitas/install.sh --with-civitas-shell
+  # Persist preflight config in the installed system.
+  - mkdir -p /target/etc/civitas
+  - cp /run/civitas/preflight.json /target/etc/civitas/preflight.json
+  # Copy civitas scripts from the live-env overlay into the target so that
+  # curtin in-target can find them inside the chroot.
+  - cp -a /usr/lib/civitas /target/usr/lib/civitas
+  # Run the civitas installer (Node + OpenClaw + civitas-shell) inside the
+  # target as root with HOME pointing at the agent user's home directory.
+  - 'curtin in-target -- env HOME=/home/%(name)s bash /usr/lib/civitas/install.sh --non-interactive --agent-name %(name)s --agent-role %(name)s --user %(name)s --with-civitas-shell'
+  # Register civitas-shell as a valid login shell, then set it for the agent user.
+  - 'curtin in-target -- bash -c "grep -qxF /usr/bin/civitas-shell /etc/shells || echo /usr/bin/civitas-shell >> /etc/shells"'
+  - curtin in-target -- chsh -s /usr/bin/civitas-shell %(name)s
   # Enable civitas-firstboot.service so it runs on the first real boot.
   - curtin in-target -- systemctl enable civitas-firstboot.service
   # Auto-login on tty1 as the agent user.
+  - mkdir -p /target/etc/systemd/system/getty@tty1.service.d
   - |
-    mkdir -p /target/etc/systemd/system/getty@tty1.service.d
-    cat > /target/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
+    cat > /target/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'AUTOLOGIN'
     [Service]
     ExecStart=
     ExecStart=-/sbin/agetty --autologin %(name)s --noclear %%I $TERM
-    EOF
-  # Set civitas-shell as the login shell for the agent user.
-  - curtin in-target -- chsh -s /usr/bin/civitas-shell %(name)s
+    AUTOLOGIN
 """
 
 
@@ -115,9 +119,15 @@ def main():
 
     yaml_content = render(preflight)
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    out_dir = os.path.dirname(args.output) or "."
+    os.makedirs(out_dir, exist_ok=True)
     with open(args.output, "w") as f:
         f.write(yaml_content)
+
+    # nocloud datasource also requires a meta-data file (may be empty).
+    meta = os.path.join(out_dir, "meta-data")
+    if not os.path.exists(meta):
+        open(meta, "w").close()
 
     print(f"wrote {args.output}")
 

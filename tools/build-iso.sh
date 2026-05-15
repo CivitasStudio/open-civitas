@@ -178,25 +178,36 @@ fi
 log "building civitas overlay ..."
 OVL="$STAGING/overlay"
 
-# /usr/lib/civitas/ — scripts (stubs for 4c; real implementations in 4d/4e)
+# /usr/lib/civitas/ — pre-flight TUI scripts
 install -Dm755 "$REPO_ROOT/scripts/preflight/preflight.py" \
     "$OVL/usr/lib/civitas/preflight.py"
 install -Dm755 "$REPO_ROOT/scripts/preflight/generate-autoinstall.py" \
     "$OVL/usr/lib/civitas/generate-autoinstall.py"
 
-# install.sh stub — will be replaced with real install.sh in 4d
-install -Dm755 /dev/stdin "$OVL/usr/lib/civitas/install.sh" <<'STUB'
-#!/bin/bash
-# Stub: replaced in 4d with real install.sh --with-civitas-shell logic.
-echo "[civitas install.sh] stub — 4c only" >&2
-exit 0
-STUB
+# Real install.sh + lib helpers — used by autoinstall late-commands (4d).
+# curtin in-target copies /usr/lib/civitas into the target chroot and runs
+# install.sh there; it sources lib/*.sh relative to SCRIPT_DIR.
+install -Dm755 "$REPO_ROOT/install.sh" "$OVL/usr/lib/civitas/install.sh"
+for lib_sh in "$REPO_ROOT/lib/"*.sh; do
+    install -Dm755 "$lib_sh" "$OVL/usr/lib/civitas/lib/$(basename "$lib_sh")"
+done
+
+# systemd service unit required by install-substrate.sh
+install -Dm644 "$REPO_ROOT/systemd/openclaw-gateway.service" \
+    "$OVL/usr/lib/civitas/systemd/openclaw-gateway.service"
+
+# civitas-shell source — install-civitas-shell.sh prefers the local checkout
+# (npm pack + npm install -g tarball) over the registry.  We strip node_modules
+# to keep the overlay small; npm pack resolves deps from the registry.
+log "bundling civitas-shell source into overlay ..."
+cp -r "$REPO_ROOT/civitas-shell" "$OVL/usr/lib/civitas/civitas-shell"
+rm -rf "$OVL/usr/lib/civitas/civitas-shell/node_modules"
 
 # firstboot.sh stub — replaced in 4e
 install -Dm755 /dev/stdin "$OVL/usr/lib/civitas/firstboot.sh" <<'STUB'
 #!/bin/bash
 # Stub: replaced in 4e with real first-boot provisioning logic.
-echo "[civitas firstboot.sh] stub — 4c only" >&2
+echo "[civitas firstboot.sh] stub — 4e pending" >&2
 exit 0
 STUB
 
@@ -229,6 +240,7 @@ TTYReset=yes
 TTYVHangup=yes
 
 ExecStartPre=/bin/mkdir -p /run/civitas
+ExecStartPre=/bin/touch /run/civitas/meta-data
 ExecStartPre=/bin/sh -c 'dpkg -l dialog >/dev/null 2>&1 || dpkg -i /usr/lib/civitas/debs/dialog_*.deb'
 ExecStart=/usr/lib/civitas/preflight.py
 ExecStartPost=/usr/lib/civitas/generate-autoinstall.py
