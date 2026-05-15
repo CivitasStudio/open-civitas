@@ -1,6 +1,6 @@
 # Open Civitas Phase 4 — Bootable ISO Spec
 
-**Status:** Draft v1 — awaiting Alex review.
+**Status:** Draft v2 — **GREENLIT** (Alex, 2026-05-15). Three spec edits applied; 4b kickoff approved.
 **Author:** Wayland
 **Date:** 2026-05-15
 **Scope:** Bootable Ubuntu 26.04 LTS ISO with a 3-question pre-flight TUI, Subiquity autoinstall, and first-boot brain provisioning. v0 = single-user agent appliance; cloud-init and multi-user out of scope.
@@ -163,8 +163,9 @@ Result: first console boot lands directly in `civitas-shell`. No login prompt.
 | `mistral` | Same pattern as anthropic-api |
 | `cohere` | Same pattern as anthropic-api |
 
-3. Installs `civitas-shell` if not already present (`npm install -g @civitasstudio/civitas-shell`; Node is installed by the main `install.sh` which runs in `late-commands`).
-4. Removes `civitas-firstboot.service` from the enabled units (runs once, never again).
+3. Installs `civitas-shell` by invoking `install.sh --with-civitas-shell` (the script is already present in the overlay at `/usr/lib/civitas/install.sh`; Node is installed by the same script). This reuses the Phase 3e pack-then-install mechanism — `install.sh` runs `npm pack` against the bundled `civitas-shell/` source and `npm install -g` the resulting tarball. No published npm package required.
+4. Shows the optional password prompt (§3.5) before handing over the console.
+5. Removes `civitas-firstboot.service` from the enabled units (runs once, never again).
 
 ### 3.4 First Chat Turn Wording
 
@@ -215,6 +216,26 @@ civitas-shell checks `/var/lib/civitas/model-pulling` on launch. If present, it 
 
 Shell is still usable — the operator can `/bash` to monitor `ollama ps` or just wait. civitas-shell polls `/var/lib/civitas/model-pulling` (file is removed by a watcher when `ollama pull` exits 0) and updates the status line automatically.
 
+### 3.5 Optional Password Prompt
+
+After brain provisioning and before civitas-shell takes over the console, `firstboot.sh` presents a `dialog`-based prompt on tty1:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Optional: Set a system password                                 │
+│                                                                  │
+│  Recommended if this machine is on a shared or external network. │
+│  You can skip and set one later with `passwd`.                   │
+│                                                                  │
+│    [ Set password ]    [ Skip ]                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+- **Set password** → runs `passwd <name>` interactively, then proceeds.
+- **Skip** → proceeds immediately; appends a one-line hint to `/etc/motd` and writes a note to the agent's MEMORY.md: *"No system password set. Run `passwd` from `/bash` to add one."*
+
+**Security trade-off (v0 note, to be documented in README before release):** Skipping leaves the account passwordless. Auto-login on tty1 means local physical access = root-equivalent. Acceptable for an air-gapped or single-user home machine; not for shared networks. This is an operator decision, not a default-secure configuration.
+
 ---
 
 ## 4. Test Plan
@@ -237,7 +258,7 @@ For each sub-step (4b–4f), Alex runs an independent manual verification on For
    - `ssh testuser@<vm-ip> 'pgrep civitas-shell || echo FAIL'`
    - `ssh testuser@<vm-ip> 'civitas-shell --noninteractive --send "Who are you?"'` → response identifies as `testuser`.
    - `/var/lib/civitas/model-pulling` is gone (Gemma pull completed).
-   - No non-loopback traffic from civitas-shell during the session.
+   - `ssh testuser@<vm-ip> 'ss -tnp 2>/dev/null | grep civitas-shell'` — fail if any destination is not `127.0.0.1`.
 7. VM is torn down.
 
 ### 4.2 Libvirt Automation Script
@@ -252,6 +273,7 @@ Options:
   --name <vm-name>     libvirt domain name (default: test-civitas-<date>-<rand>)
   --brain <brain>      Brain to select in TUI (default: ollama+gemma-local)
   --agent-name <name>  Agent name to enter in TUI (default: testuser)
+  --set-password       Exercise the "Set password" branch at first boot (default: Skip)
   --keep               Don't destroy the VM after test (for inspection)
   -h, --help
 ```
@@ -323,13 +345,14 @@ Five sub-steps, each ending with a verifiable artifact and an inbox sign-off. Or
 
 ---
 
-### 4e — First-boot bootstrap (~1–2 days)
+### 4e — First-boot bootstrap (~2 days)
 
 **Scope:**
-- `civitas-firstboot.service` + `scripts/firstboot.sh` — reads `/etc/civitas/preflight.json`, writes `openclaw.json`, does brain-specific provisioning, disables itself.
+- `civitas-firstboot.service` + `scripts/firstboot.sh` — reads `/etc/civitas/preflight.json`, writes `openclaw.json`, does brain-specific provisioning, shows optional password prompt (§3.5), disables itself.
 - Ollama + Gemma pull flow (background pull, `/var/lib/civitas/model-pulling` sentinel, watcher).
-- `civitas.pendingAuth` flag in `openclaw.json` for OAuth/API-key brains.
+- `civitas.pendingAuth` flag in `openclaw.json` for OAuth/API-key brains (namespace: `civitas.*`, camelCase to match `openclaw.json` conventions; exact field name confirmed against gateway config schema before implementation).
 - `civitas-shell` changes: reads `pendingAuth` on launch, renders framed one-time setup prompt; polls `model-pulling` sentinel with status-line updates.
+- Optional password prompt: `dialog`-based, runs in `firstboot.sh` before handing over console. Skip path writes `/etc/motd` hint + MEMORY.md note.
 
 **Verify (Ollama+Gemma path):**
 - Boot the 4d VM (or a fresh one) all the way through. Wait for firstboot to complete.
@@ -337,9 +360,13 @@ Five sub-steps, each ending with a verifiable artifact and an inbox sign-off. Or
 - `ssh testuser@<vm-ip> 'civitas-shell --noninteractive --send "Who are you?"'` → response identifies as `testuser`, mentions Gemma/Ollama.
 - `/var/lib/civitas/model-pulling` is absent (pull complete).
 
+**Verify (password prompt):**
+- Run `firstboot.sh` in a test VM (from 4d); automation selects "Skip" — confirm `/etc/motd` contains the hint.
+- Run again selecting "Set password" — confirm `passwd <name>` ran (check `/etc/shadow` has a non-`!` entry for the user).
+
 **Verify (anthropic-cli path — requires a real Anthropic CLI token):**
 - Can be tested with a mock: `civitas-shell --noninteractive --preflight-check` (new flag, emits the pending-auth text to stdout without connecting). Confirms the framing is correct.
-- Full OAuth path tested manually by Alex (he has an Anthropic account).
+- Full OAuth path tested manually by Alex (he has an Anthropic account; Alex confirmed as verification owner).
 
 ---
 
@@ -351,13 +378,14 @@ Five sub-steps, each ending with a verifiable artifact and an inbox sign-off. Or
 - CI documentation in `DEVELOPMENT.md`: how to run the E2E suite on Forge.
 
 **Verify:**
-- `tests/e2e/install-test.sh --iso dist/opencivitas-v0-<date>.iso` passes end-to-end (§4.1 flow) on Forge.
-- VM is torn down automatically after PASS.
-- Alex runs the same script independently with `--keep`, inspects the live VM, drops sign-off.
+- `tests/e2e/install-test.sh --iso dist/opencivitas-v0-<date>.iso` passes end-to-end (§4.1 flow, Skip-password path) on Forge.
+- `tests/e2e/install-test.sh --iso dist/opencivitas-v0-<date>.iso --set-password` passes (Set-password path — automation sends a test password via `pexpect`; verifies `/etc/shadow` has a non-`!` entry).
+- Both VMs torn down automatically after PASS.
+- Alex runs the Skip-path script independently with `--keep`, inspects the live VM, drops sign-off.
 
 ---
 
-**Estimated total:** ~6–7 days across 4b–4f.
+**Estimated total:** ~7–8 days across 4b–4f.
 
 ---
 
@@ -373,13 +401,13 @@ Five sub-steps, each ending with a verifiable artifact and an inbox sign-off. Or
 
 ## Open Items (pre-code gates)
 
-These must be resolved before 4b implementation begins. Alex signs off on each.
+**All three resolved as of 2026-05-15 (Alex review).**
 
-1. **`dialog` availability in Ubuntu 26.04 live environment** — verify that `dialog` is present by default in the Ubuntu 26.04 server live ISO squashfs, or confirm we can reliably install it in the overlay without network access during install. If absent, propose alternatives (Python curses only, or bundle the deb). *(Wayland to verify on Forge before 4b starts.)*
+1. **`dialog` availability in Ubuntu 26.04 live environment** — ✅ *Wayland to verify on Forge before 4b code lands.* If `dialog` is absent from the live squashfs, bundle the `.deb` in the overlay (preferred over rewriting in pure curses — smaller diff, well-trodden approach). Alex confirmed this fallback is acceptable.
 
-2. **`civitas.pendingAuth` config field** — confirm the field name and path in `openclaw.json` with Alex, so civitas-shell and firstboot.sh agree. The gateway config schema may already have a hook point; check before inventing a new field. *(Wayland to check `openclaw.json` schema and gateway config docs; Alex final call.)*
+2. **`civitas.pendingAuth` config field name** — ✅ *Wayland to check `openclaw.json` schema and gateway config docs; Alex blesses the final name.* Constraint: keep under `civitas.*` namespace (obviously our extension, not a gateway-owned field); camelCase to match `openclaw.json` conventions.
 
-3. **Anthropic CLI path verification owner** — Alex has an Anthropic account for the OAuth path. Confirm he will run the manual OAuth verification step in 4e. *(Agree before 4e starts.)*
+3. **Anthropic CLI OAuth verification owner in 4e** — ✅ Alex owns it. Has an Anthropic account, will run the manual OAuth round-trip when 4e is up for sign-off.
 
 ---
 
