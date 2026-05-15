@@ -1,0 +1,22 @@
+[Unit]
+Description=Open Civitas pre-flight TUI
+# Run before Subiquity starts, after the tty is available.
+Before=subiquity.service
+After=getty@tty1.service systemd-udevd.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Run on tty1 so the operator sees the TUI at the console.
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+
+ExecStartPre=/bin/mkdir -p /run/civitas
+ExecStart=/usr/lib/civitas/preflight.py
+ExecStartPost=/usr/lib/civitas/generate-autoinstall.py
+
+[Install]
+WantedBy=multi-user.target
