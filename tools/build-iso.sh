@@ -203,13 +203,11 @@ log "bundling civitas-shell source into overlay ..."
 cp -r "$REPO_ROOT/civitas-shell" "$OVL/usr/lib/civitas/civitas-shell"
 rm -rf "$OVL/usr/lib/civitas/civitas-shell/node_modules"
 
-# firstboot.sh stub — replaced in 4e
-install -Dm755 /dev/stdin "$OVL/usr/lib/civitas/firstboot.sh" <<'STUB'
-#!/bin/bash
-# Stub: replaced in 4e with real first-boot provisioning logic.
-echo "[civitas firstboot.sh] stub — 4e pending" >&2
-exit 0
-STUB
+# Real firstboot.sh + civitas-firstboot.service (4e).
+install -Dm755 "$REPO_ROOT/scripts/firstboot/firstboot.sh" \
+    "$OVL/usr/lib/civitas/firstboot.sh"
+install -Dm644 "$REPO_ROOT/systemd/civitas-firstboot.service" \
+    "$OVL/usr/lib/civitas/systemd/civitas-firstboot.service"
 
 # /usr/lib/civitas/debs/ — bundled packages for the live environment.
 # dialog is not in the Ubuntu 26.04 live squashfs by default.

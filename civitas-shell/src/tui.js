@@ -1,13 +1,17 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { render, Box, Text, useInput, useApp, useStdout } from 'ink';
 import { randomUUID } from 'crypto';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { homedir, userInfo } from 'os';
 import { join } from 'path';
 import { GatewayClient } from './gateway.js';
-import { loadConfig } from './config.js';
+import { loadConfig, clearPendingAuth } from './config.js';
 import { LABEL, STATUS, GREETING, DIM } from './theme.js';
+import { checkModelPulling } from './setup.js';
+
+const MODEL_PULLING = '/var/lib/civitas/model-pulling';
+const MODEL_PULL_POLL_MS = 15_000;
 
 const h = React.createElement;
 
@@ -124,6 +128,22 @@ function GreetingBlock({ text }) {
     h(Box, { paddingLeft: 2 },
       h(Text, { color: GREETING, wrap: 'wrap' }, text)
     )
+  );
+}
+
+function ModelPullingBanner() {
+  const [visible, setVisible] = useState(existsSync(MODEL_PULLING));
+  useEffect(() => {
+    if (!visible) return;
+    const id = setInterval(() => {
+      if (!existsSync(MODEL_PULLING)) setVisible(false);
+    }, MODEL_PULL_POLL_MS);
+    return () => clearInterval(id);
+  }, [visible]);
+  if (!visible) return null;
+  return h(Box, { marginBottom: 1 },
+    h(Text, { color: 'yellow' },
+      '⏳ Gemma still downloading. Check progress: /bash → ollama ps')
   );
 }
 
@@ -413,6 +433,7 @@ function App({ gw, sessionId: initialSessionId, history, loginShell, onBashEscap
 
   return h(Box, { flexDirection: 'column' },
     h(GreetingBlock, { text: greeting }),
+    h(ModelPullingBanner),
     h(Box, { flexDirection: 'column', height: transcriptHeight, overflow: 'hidden' },
       ...visibleMessages.map(m =>
         h(MessageBlock, { key: m.id, role: m.role, text: m.text })
@@ -436,6 +457,10 @@ export async function launchTUI(opts = {}) {
   });
 
   await gw.connect();
+  // Clear civitas.pendingAuth on first successful connection — auth is done.
+  if (cfg.civitas?.pendingAuth && cfg._cfgPath) {
+    clearPendingAuth(cfg._cfgPath);
+  }
 
   const histResult = await gw.request('chat.history', {
     sessionKey: SESSION_KEY,

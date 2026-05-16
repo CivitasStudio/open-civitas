@@ -74,7 +74,8 @@ late-commands:
   # Register civitas-shell as a valid login shell, then set it for the agent user.
   - 'curtin in-target -- bash -c "grep -qxF /usr/bin/civitas-shell /etc/shells || echo /usr/bin/civitas-shell >> /etc/shells"'
   - curtin in-target -- chsh -s /usr/bin/civitas-shell %(name)s
-  # Enable civitas-firstboot.service so it runs on the first real boot.
+  # Install and enable civitas-firstboot.service.
+  - cp /usr/lib/civitas/systemd/civitas-firstboot.service /target/etc/systemd/system/civitas-firstboot.service
   - curtin in-target -- systemctl enable civitas-firstboot.service
   # Auto-login on tty1 as the agent user.
   - mkdir -p /target/etc/systemd/system/getty@tty1.service.d

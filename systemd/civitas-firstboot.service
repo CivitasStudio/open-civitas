@@ -1,0 +1,22 @@
+[Unit]
+Description=Open Civitas first-boot provisioning
+Documentation=https://github.com/CivitasStudio/open-civitas
+# Run after network is up (needs internet for Ollama install + model pull).
+After=network-online.target
+Wants=network-online.target
+# Must complete before autologin fires so the password prompt has the TTY.
+Before=getty@tty1.service
+# Only run if the preflight config exists (safety guard).
+ConditionPathExists=/etc/civitas/preflight.json
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+ExecStart=/usr/lib/civitas/firstboot.sh
+
+[Install]
+WantedBy=multi-user.target
